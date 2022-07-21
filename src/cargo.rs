@@ -7,7 +7,7 @@ use anyhow::{bail, format_err, Context as _, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::{
-    cli::{Args, ManifestOptions, RunOptions},
+    cli::{Args, ManifestOptions, Subcommand},
     config::Config,
     context::Context,
     env,
@@ -194,13 +194,13 @@ fn metadata(
     options: &ManifestOptions,
 ) -> Result<cargo_metadata::Metadata> {
     let mut cmd = cmd!(cargo, "metadata", "--format-version=1", "--manifest-path", manifest_path);
-    options.cargo_args(&mut cmd);
     serde_json::from_str(&cmd.read()?)
         .with_context(|| format!("failed to parse output from {}", cmd))
 }
 
 // https://doc.rust-lang.org/nightly/cargo/commands/cargo-test.html
-pub(crate) fn test_args(cx: &Context, args: &Args, cmd: &mut ProcessBuilder) {
+// https://doc.rust-lang.org/nightly/cargo/commands/cargo-run.html
+pub(crate) fn test_or_run_args(cx: &Context, args: &Args, cmd: &mut ProcessBuilder) {
     let mut has_target_selection_options = false;
     if args.lib {
         has_target_selection_options = true;
@@ -251,13 +251,10 @@ pub(crate) fn test_args(cx: &Context, args: &Args, cmd: &mut ProcessBuilder) {
         cmd.arg("--doc");
     }
 
-    if !has_target_selection_options && !cx.doctests {
+    if args.subcommand == Subcommand::Test && !has_target_selection_options && !cx.doctests {
         cmd.arg("--tests");
     }
 
-    if args.quiet {
-        cmd.arg("--quiet");
-    }
     if args.no_fail_fast {
         cmd.arg("--no-fail-fast");
     }
@@ -284,55 +281,14 @@ pub(crate) fn test_args(cx: &Context, args: &Args, cmd: &mut ProcessBuilder) {
     cmd.arg(&cx.ws.target_dir);
 
     cx.build.cargo_args(cmd);
-    cx.manifest.cargo_args(cmd);
 
-    for unstable_flag in &args.unstable_flags {
-        cmd.arg("-Z");
-        cmd.arg(unstable_flag);
+    for cargo_arg in &args.cargo_args {
+        cmd.arg(cargo_arg);
     }
 
-    if !args.args.is_empty() {
+    if !args.rest.is_empty() {
         cmd.arg("--");
-        cmd.args(&args.args);
-    }
-}
-
-// https://doc.rust-lang.org/nightly/cargo/commands/cargo-run.html
-pub(crate) fn run_args(cx: &Context, args: &RunOptions, cmd: &mut ProcessBuilder) {
-    for name in &args.bin {
-        cmd.arg("--bin");
-        cmd.arg(name);
-    }
-    for name in &args.example {
-        cmd.arg("--example");
-        cmd.arg(name);
-    }
-
-    if args.quiet {
-        cmd.arg("--quiet");
-    }
-    if let Some(package) = &args.package {
-        cmd.arg("--package");
-        cmd.arg(package);
-    }
-
-    cmd.arg("--manifest-path");
-    cmd.arg(&cx.ws.current_manifest);
-
-    cmd.arg("--target-dir");
-    cmd.arg(&cx.ws.target_dir);
-
-    cx.build.cargo_args(cmd);
-    cx.manifest.cargo_args(cmd);
-
-    for unstable_flag in &args.unstable_flags {
-        cmd.arg("-Z");
-        cmd.arg(unstable_flag);
-    }
-
-    if !args.args.is_empty() {
-        cmd.arg("--");
-        cmd.args(&args.args);
+        cmd.args(&args.rest);
     }
 }
 
@@ -359,8 +315,6 @@ pub(crate) fn clean_args(cx: &Context, cmd: &mut ProcessBuilder) {
 
     cmd.arg("--target-dir");
     cmd.arg(&cx.ws.target_dir);
-
-    cx.manifest.cargo_args(cmd);
 
     // If `-vv` is passed, propagate `-v` to cargo.
     if cx.build.verbose > 1 {

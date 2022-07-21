@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2018_idioms, single_use_lifetimes, unreachable_pub)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::single_match_else, clippy::struct_excessive_bools)]
+#![allow(
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines
+)]
+#![allow(unused)] // WIP
 
 // Refs:
 // - https://doc.rust-lang.org/nightly/rustc/instrument-coverage.html
@@ -33,13 +39,11 @@ use std::{
 use anyhow::{Context as _, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_llvm_cov::json;
-use clap::Parser;
-use cli::{RunOptions, ShowEnvOptions};
 use regex::Regex;
 use walkdir::WalkDir;
 
 use crate::{
-    cli::{Args, Opts, Subcommand},
+    cli::{Args, ShowEnvOptions, Subcommand},
     config::StringOrArray,
     context::Context,
     json::LlvmCovJsonExport,
@@ -60,18 +64,18 @@ fn main() {
 }
 
 fn try_main() -> Result<()> {
-    let Opts::LlvmCov(mut args) = Opts::parse();
+    let mut args = Args::parse()?;
 
-    match args.subcommand.take() {
-        Some(Subcommand::Demangle) => {
+    match args.subcommand {
+        Subcommand::Demangle => {
             demangler::run()?;
         }
 
-        Some(Subcommand::Clean(options)) => {
-            clean::run(options)?;
+        Subcommand::Clean => {
+            clean::run(&mut args)?;
         }
 
-        Some(Subcommand::Run(mut args)) => {
+        Subcommand::Run => {
             let cx = &Context::new(
                 args.build(),
                 args.manifest(),
@@ -93,26 +97,16 @@ fn try_main() -> Result<()> {
             }
         }
 
-        Some(Subcommand::ShowEnv(options)) => {
+        Subcommand::ShowEnv => {
             let cx = &context_from_args(&mut args, true)?;
+            let options = ShowEnvOptions { export_prefix: true }; // TODO
             let writer = &mut ShowEnvWriter { target: std::io::stdout(), options };
             set_env(cx, writer);
             writer.set("CARGO_LLVM_COV_TARGET_DIR", cx.ws.metadata.target_directory.as_str());
         }
 
-        Some(Subcommand::Nextest { passthrough_options }) => {
-            let cx = &context_from_args(
-                &mut Args::try_parse_from(
-                    [
-                        // fake argv[0] to help clap parse
-                        "nextest".to_string(),
-                    ]
-                    .iter()
-                    // real pass-through args
-                    .chain(passthrough_options.iter()),
-                )?,
-                false,
-            )?;
+        Subcommand::Nextest => {
+            let cx = &context_from_args(&mut args, false)?;
 
             clean::clean_partial(cx)?;
             create_dirs(cx)?;
@@ -131,7 +125,7 @@ fn try_main() -> Result<()> {
             }
         }
 
-        None => {
+        Subcommand::Test => {
             let cx = &context_from_args(&mut args, false)?;
             let tmp = term::warn(); // The following warnings should not be promoted to an error.
             if args.doctests {
@@ -325,8 +319,23 @@ fn set_env(cx: &Context, env: &mut impl EnvTarget) {
     env.set("RUST_TEST_THREADS", "1");
 }
 
-fn has_z_flag(args: &Args, name: &str) -> bool {
-    args.unstable_flags.iter().any(|f| f == name)
+fn has_z_flag(args: &[String], name: &str) -> bool {
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(mut arg) = iter.next() {
+        if arg == "-Z" {
+            arg = iter.next().unwrap();
+        } else if let Some(a) = arg.strip_prefix("-Z") {
+            arg = a;
+        } else {
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix(name) {
+            if rest.is_empty() || rest.starts_with('=') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn run_test(cx: &Context, args: &Args) -> Result<()> {
@@ -335,7 +344,7 @@ fn run_test(cx: &Context, args: &Args) -> Result<()> {
     set_env(cx, &mut cargo);
 
     cargo.arg("test");
-    if cx.doctests && !has_z_flag(args, "doctest-in-workspace") {
+    if cx.doctests && !has_z_flag(&args.cargo_args, "doctest-in-workspace") {
         // https://github.com/rust-lang/cargo/issues/9427
         cargo.arg("-Z");
         cargo.arg("doctest-in-workspace");
@@ -346,7 +355,7 @@ fn run_test(cx: &Context, args: &Args) -> Result<()> {
         if !args.no_run {
             cargo_no_run.arg("--no-run");
         }
-        cargo::test_args(cx, args, &mut cargo_no_run);
+        cargo::test_or_run_args(cx, args, &mut cargo_no_run);
         if term::verbose() {
             status!("Running", "{}", cargo_no_run);
             cargo_no_run.stdout_to_stderr().run()?;
@@ -357,7 +366,7 @@ fn run_test(cx: &Context, args: &Args) -> Result<()> {
         drop(cargo_no_run);
 
         cargo.arg("--no-fail-fast");
-        cargo::test_args(cx, args, &mut cargo);
+        cargo::test_or_run_args(cx, args, &mut cargo);
         if term::verbose() {
             status!("Running", "{}", cargo);
         }
@@ -365,7 +374,7 @@ fn run_test(cx: &Context, args: &Args) -> Result<()> {
             warn!("{}", e);
         }
     } else {
-        cargo::test_args(cx, args, &mut cargo);
+        cargo::test_or_run_args(cx, args, &mut cargo);
         if term::verbose() {
             status!("Running", "{}", cargo);
         }
@@ -386,7 +395,7 @@ fn run_nextest(cx: &Context, args: &Args) -> Result<()> {
         return Err(anyhow::anyhow!("doctest is not supported for nextest"));
     }
 
-    cargo::test_args(cx, args, &mut cargo);
+    cargo::test_or_run_args(cx, args, &mut cargo);
 
     if term::verbose() {
         status!("Running", "{}", cargo);
@@ -395,13 +404,13 @@ fn run_nextest(cx: &Context, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn run_run(cx: &Context, args: &RunOptions) -> Result<()> {
+fn run_run(cx: &Context, args: &Args) -> Result<()> {
     let mut cargo = cx.cargo();
 
     set_env(cx, &mut cargo);
 
     cargo.arg("run");
-    cargo::run_args(cx, args, &mut cargo);
+    cargo::test_or_run_args(cx, args, &mut cargo);
 
     if term::verbose() {
         status!("Running", "{}", cargo);

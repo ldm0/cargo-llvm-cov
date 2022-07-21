@@ -11,24 +11,24 @@ use walkdir::WalkDir;
 
 use crate::{
     cargo::{self, Workspace},
-    cli::{CleanOptions, ManifestOptions},
+    cli::{Args, ManifestOptions},
     context::Context,
     fs, term,
 };
 
-pub(crate) fn run(mut options: CleanOptions) -> Result<()> {
+pub(crate) fn run(options: &mut Args) -> Result<()> {
     let ws = Workspace::new(&options.manifest, None, false, false)?;
-    ws.config.merge_to_args(&mut None, &mut options.verbose, &mut options.color);
-    term::set_coloring(&mut options.color);
+    ws.config.merge_to_args(&mut None, &mut options.build.verbose, &mut options.build.color);
+    term::set_coloring(&mut options.build.color);
 
     if !options.workspace {
         for dir in &[&ws.target_dir, &ws.output_dir] {
-            rm_rf(dir, options.verbose != 0)?;
+            rm_rf(dir, options.build.verbose != 0)?;
         }
         return Ok(());
     }
 
-    clean_ws(&ws, &ws.metadata.workspace_members, &options.manifest, options.verbose)?;
+    clean_ws(&ws, &ws.metadata.workspace_members, &options.manifest, options.build.verbose)?;
 
     Ok(())
 }
@@ -90,7 +90,6 @@ fn clean_ws(
         if verbose > 0 {
             cmd.arg(format!("-{}", "v".repeat(verbose as usize)));
         }
-        manifest.cargo_args(&mut cmd);
         cmd.dir(&ws.metadata.workspace_root);
         if let Err(e) = if verbose > 0 { cmd.run() } else { cmd.run_with_output() } {
             warn!("{:#}", e);
